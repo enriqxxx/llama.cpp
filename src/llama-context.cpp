@@ -559,7 +559,8 @@ llama_context::llama_context(
                 // use the host buffer of the first device CPU for faster transfer of the intermediate state
                 const auto & dev = model.devices[0];
                 auto * host_buft = ggml_backend_dev_host_buffer_type(dev.dev);
-                if (host_buft) {
+                // a device with lazy buffers keeps the inputs in pageable memory, which is only taken as it is written
+                if (host_buft && !ggml_backend_dev_lazy_buffer_type(dev.dev)) {
                     buft = host_buft;
                 }
             }
