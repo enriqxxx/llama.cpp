@@ -779,8 +779,13 @@ void llama_context::sched_new(const sched_params & params) {
     }
 
     // the compute buffers take memory as the graph uses it when the device can, as the KV cache does
+    // the CPU keeps the buffer type chosen above: its compute buffer already takes memory as it is written
     for (size_t i = 0; i < backend_ptrs.size(); ++i) {
-        if (auto * lazy = ggml_backend_dev_lazy_buffer_type(ggml_backend_get_device(backend_ptrs[i]))) {
+        ggml_backend_dev_t dev = ggml_backend_get_device(backend_ptrs[i]);
+        if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+            continue;
+        }
+        if (auto * lazy = ggml_backend_dev_lazy_buffer_type(dev)) {
             backend_buft[i] = lazy;
         }
     }

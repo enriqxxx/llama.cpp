@@ -210,20 +210,14 @@ llama_kv_cache::llama_kv_cache(
         const uint32_t n_embd_k_gqa =            hparams.n_embd_k_gqa(il);
         const uint32_t n_embd_v_gqa = !v_trans ? hparams.n_embd_v_gqa(il) : hparams.n_embd_v_gqa_max();
 
-        const char * dev_name = "CPU";
+        auto * dev = offload ? model.dev_layer(il) : ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
 
-        ggml_backend_buffer_type_t buft = ggml_backend_cpu_buffer_type();
+        const char * dev_name = offload ? ggml_backend_dev_name(dev) : "CPU";
 
-        if (offload) {
-            auto * dev = model.dev_layer(il);
-
-            // a lazy buffer gets memory as apply_ubatch() commits the rows
-            buft = lazy ? ggml_backend_dev_lazy_buffer_type(dev) : nullptr;
-            if (buft == nullptr) {
-                buft = ggml_backend_dev_buffer_type(dev);
-            }
-
-            dev_name = ggml_backend_dev_name(dev);
+        // a lazy buffer gets memory as apply_ubatch() commits the rows, on the device of the layer or on the CPU
+        ggml_backend_buffer_type_t buft = lazy && dev ? ggml_backend_dev_lazy_buffer_type(dev) : nullptr;
+        if (buft == nullptr) {
+            buft = offload ? ggml_backend_dev_buffer_type(dev) : ggml_backend_cpu_buffer_type();
         }
 
         LLAMA_LOG_DEBUG("%s: layer %3d: dev = %s\n", __func__, il, dev_name);
