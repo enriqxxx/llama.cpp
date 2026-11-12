@@ -1058,6 +1058,7 @@ struct vk_lazy_span {
     size_t offset;
     size_t size;
     vk::DeviceMemory mem;
+    void * ptr = nullptr; // mapped on UMA, freeing the memory unmaps it
 };
 
 struct vk_buffer_struct {
@@ -1074,6 +1075,7 @@ struct vk_buffer_struct {
     std::vector<bool> blocks;
     std::vector<vk_lazy_span> spans;
     uint32_t mem_type = 0;
+    bool span_map = false;
 
     ~vk_buffer_struct() {
         if (size == 0) {

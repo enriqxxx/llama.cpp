@@ -326,7 +326,7 @@ vk_buffer ggml_vk_create_buffer_lazy(vk_device & device, size_t size) {
     buf->buffer = device->device.createBuffer(ggml_vk_lazy_buffer_info(device, vsize));
     buf->device = device;
     buf->size   = size;
-    // never mapped, the host reads and writes through staging
+    // never mapped as a whole: on UMA each span is mapped when it is bound, and the host writes it as an eager buffer
     buf->memory_property_flags = vk::MemoryPropertyFlagBits::eDeviceLocal;
     buf->ptr    = nullptr;
     buf->blocks.resize(vsize / block);
@@ -335,6 +335,8 @@ vk_buffer ggml_vk_create_buffer_lazy(vk_device & device, size_t size) {
     if (buf->mem_type == UINT32_MAX) {
         throw vk::OutOfDeviceMemoryError("No device-local memory type for a lazy buffer");
     }
+    const vk::MemoryPropertyFlags host = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+    buf->span_map = device->uma && (device->physical_device.getMemoryProperties().memoryTypes[buf->mem_type].propertyFlags & host) == host;
 
     if (device->buffer_device_address) {
         const vk::BufferDeviceAddressInfo addressInfo(buf->buffer);
@@ -568,8 +570,20 @@ static bool ggml_vk_lazy_bind(const vk_buffer & buf, size_t offset, size_t size)
         return false;
     }
 
-    buf->spans.push_back({ offset, size, mem });
-    ggml_vk_lazy_zero(buf, offset, size);
+    void * ptr = nullptr;
+    if (buf->span_map) {
+        try {
+            ptr = device->device.mapMemory(mem, 0, size);
+        } catch (const vk::SystemError &) {
+            ptr = nullptr;
+        }
+    }
+    buf->spans.push_back({ offset, size, mem, ptr });
+    if (ptr != nullptr) {
+        memset(ptr, 0, size);
+    } else {
+        ggml_vk_lazy_zero(buf, offset, size);
+    }
 
     VK_LOG_MEMORY("lazy " << buf->buffer << ": +" << format_size(size) << " at " << format_size(offset) << ", " << buf->spans.size() << " spans");
     return true;
@@ -622,11 +636,10 @@ static void ggml_vk_lazy_write(const vk_buffer & dst, size_t offset, size_t size
     }
 }
 
-// A zero memset fills only the committed spans in the range, the rest already reads as zero. Other values commit the range.
+// A zero memset fills only the committed spans in the range, the rest already reads as zero. Other values commit the range first.
 static std::vector<vk_lazy_span> ggml_vk_lazy_memset_spans(const vk_buffer & dst, size_t offset, uint32_t c, size_t size) {
     if (c != 0) {
         ggml_vk_lazy_write(dst, offset, size);
-        return { { offset, size, {} } };
     }
     std::lock_guard<std::recursive_mutex> guard(dst->device->mutex);
     std::vector<vk_lazy_span> res;
@@ -634,10 +647,40 @@ static std::vector<vk_lazy_span> ggml_vk_lazy_memset_spans(const vk_buffer & dst
         const size_t a = std::max(offset, span.offset);
         const size_t b = std::min(offset + size, span.offset + span.size);
         if (a < b) {
-            res.push_back({ a, b - a, span.mem });
+            res.push_back({ a, b - a, span.mem, span.ptr ? (uint8_t *) span.ptr + (a - span.offset) : nullptr });
         }
     }
     return res;
+}
+
+// UMA: the spans of a lazy buffer are mapped, so the host writes them as it does an eager buffer. False if one is not: use staging.
+static bool ggml_vk_lazy_host_write(const vk_buffer & dst, size_t offset, const void * src, size_t spitch, size_t dpitch, size_t width, size_t height) {
+    if (!dst->span_map) {
+        return false;
+    }
+    const size_t end = offset + (height - 1) * dpitch + width;
+    ggml_vk_lazy_write(dst, offset, end - offset);
+    std::lock_guard<std::recursive_mutex> guard(dst->device->mutex);
+    std::vector<const vk_lazy_span *> in;
+    for (const vk_lazy_span & span : dst->spans) {
+        if (span.offset < end && offset < span.offset + span.size) {
+            if (span.ptr == nullptr) {
+                return false;
+            }
+            in.push_back(&span);
+        }
+    }
+    for (size_t i = 0; i < height; i++) {
+        const size_t row = offset + i * dpitch;
+        for (const vk_lazy_span * span : in) {
+            const size_t a = std::max(row, span->offset);
+            const size_t b = std::min(row + width, span->offset + span->size);
+            if (a < b) {
+                memcpy((uint8_t *) span->ptr + (a - span->offset), (const uint8_t *) src + i * spitch + (a - row), b - a);
+            }
+        }
+    }
+    return true;
 }
 
 static void ggml_vk_buffer_write_nc_async(ggml_backend_vk_context * ctx, vk_context& subctx, vk_buffer& dst, size_t offset, const ggml_tensor * tensor, bool sync_staging = false) {
@@ -815,6 +858,9 @@ bool ggml_vk_buffer_write_async(vk_context subctx, vk_buffer& dst, size_t offset
 
 void ggml_vk_buffer_write_2d(vk_buffer& dst, size_t offset, const void * src, size_t spitch, size_t dpitch, size_t width, size_t height) {
     VK_LOG_DEBUG("ggml_vk_buffer_write_2d(" << width << ", " << height << ")");
+    if (!dst->blocks.empty() && height > 0 && ggml_vk_lazy_host_write(dst, offset, src, spitch, dpitch, width, height)) {
+        return;
+    }
     // Buffer is already mapped
     if(dst->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible) {
         GGML_ASSERT(dst->memory_property_flags & vk::MemoryPropertyFlagBits::eHostCoherent);
@@ -1028,6 +1074,16 @@ void ggml_vk_buffer_memset(vk_buffer& dst, size_t offset, uint32_t c, size_t siz
     if (!dst->blocks.empty()) {
         spans = ggml_vk_lazy_memset_spans(dst, offset, c, size);
         if (spans.empty()) {
+            return;
+        }
+        bool mapped = true;
+        for (const vk_lazy_span & span : spans) {
+            mapped = mapped && span.ptr != nullptr;
+        }
+        if (mapped) {
+            for (const vk_lazy_span & span : spans) {
+                memset(span.ptr, c, span.size);
+            }
             return;
         }
     }
