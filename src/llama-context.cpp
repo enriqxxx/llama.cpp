@@ -777,6 +777,13 @@ void llama_context::sched_new(const sched_params & params) {
         return;
     }
 
+    // the compute buffers take memory as the graph uses it when the device can, as the KV cache does
+    for (size_t i = 0; i < backend_ptrs.size(); ++i) {
+        if (auto * lazy = ggml_backend_dev_lazy_buffer_type(ggml_backend_get_device(backend_ptrs[i]))) {
+            backend_buft[i] = lazy;
+        }
+    }
+
     sched.reset(ggml_backend_sched_new(
             backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), params.max_nodes, params.parallel, params.op_offload));
 
