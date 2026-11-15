@@ -3641,6 +3641,26 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_ENDPOINT_SLOTS"));
     add_opt(common_arg(
+        {"--prefill-budget-busy"}, "N",
+        string_format("fair prefill: the shortest-remaining prompt first takes the step's prompt budget, at most N prompt tokens per server step while a slot is generating; 0 = upstream scheduler (default: %d)", params.prefill_budget_busy),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.prefill_budget_busy = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_PREFILL_BUDGET_BUSY"));
+    add_opt(common_arg(
+        {"--spec-max-busy-slots"}, "N",
+        string_format("start no new speculative draft while N or more slots are generating, 0 = never (default: %d)", params.spec_max_busy_slots),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.spec_max_busy_slots = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_MAX_BUSY_SLOTS"));
+    add_opt(common_arg(
         {"--slot-save-path"}, "PATH",
         "path to save slot kv cache (default: disabled)",
         [](common_params & params, const std::string & value) {
