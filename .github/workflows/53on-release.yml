@@ -1,0 +1,65 @@
+name: 53ON release
+
+# The house branch built for Ubuntu 24.04 Vulkan x64 and packed like upstream's release
+# (llama-<tag>-bin-ubuntu-vulkan-x64.tar.gz), so 53ON AI Server installs it from Settings > Engine.
+# Ubuntu's own glslc, not the LunarG SDK: on the Ryzen AI Max the SDK's shaders read 21 % slower.
+# The release is created as a draft and published by hand once its notes are reviewed.
+on:
+  push:
+    tags: ['b*-53on*']
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  ui-build:
+    uses: ./.github/workflows/ui-build.yml
+
+  ubuntu-vulkan:
+    needs: ui-build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download UI build
+        uses: actions/download-artifact@v8
+        with:
+          name: llama-ui.zip
+          path: tools/ui/dist
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential glslc libvulkan-dev spirv-headers libssl-dev ninja-build
+
+      - name: Build
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DGGML_VULKAN=ON
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Check
+        run: |
+          ./build/bin/llama-server --version
+          ./build/bin/llama-server --help > help.txt
+          grep -q -- --prefill-budget-busy help.txt
+
+      - name: Pack and draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          T=${GITHUB_REF_NAME}
+          cp LICENSE ./build/bin/
+          tar -czf llama-$T-bin-ubuntu-vulkan-x64.tar.gz --transform "s,^\.,llama-$T," -C ./build/bin .
+          gh release create "$T" llama-$T-bin-ubuntu-vulkan-x64.tar.gz --draft --title "53ON llama.cpp $T" --notes "53ON llama.cpp $T"
