@@ -2576,6 +2576,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
                 GGML_ABORT("fatal error");
         }
 
+        if (down_exps->ne[0] > cur->ne[0]) {
+            cur = ggml_pad(ctx0, cur, down_exps->ne[0] - cur->ne[0], 0, 0, 0);
+        }
+
         // TODO: this graph-level rescaling should only be applied when the corresponding backend does not support
         //       ggml_prec_set_src(experts, GGML_PREC_BF16, 1);
         //       the amax op cannot be split across devices, so these architectures are denied -sm tensor [TAG_MOE_AMAX_SCALE]
